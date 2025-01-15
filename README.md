@@ -1,120 +1,63 @@
-# `kcp` is a minimal Kubernetes API server
+# <img alt="Logo" width="80px" src="./contrib/logo/blue-green.png" style="vertical-align: middle;" /> kcp
 
-![build status badge](https://github.com/kcp-dev/kcp/actions/workflows/ci.yaml/badge.svg)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/8119/badge)](https://www.bestpractices.dev/projects/8119)
+[![Go Report Card](https://goreportcard.com/badge/github.com/kcp-dev/kcp)](https://goreportcard.com/report/github.com/kcp-dev/kcp)
+[![GitHub](https://img.shields.io/github/license/kcp-dev/kcp)](https://img.shields.io/github/license/kcp-dev/kcp)
+[![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/kcp-dev/kcp?sort=semver)](https://img.shields.io/github/v/release/kcp-dev/kcp?sort=semver)
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fkcp-dev%2Fkcp.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fkcp-dev%2Fkcp?ref=badge_shield)
 
-How minimal exactly? `kcp` doesn't know about [`Pod`](https://kubernetes.io/docs/concepts/workloads/pods/)s or [`Node`](https://kubernetes.io/docs/concepts/architecture/nodes/)s, let alone [`Deployment`](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/)s, [`Service`](https://kubernetes.io/docs/concepts/services-networking/service/)s, [`LoadBalancer`](https://kubernetes.io/docs/tasks/access-application-cluster/create-external-load-balancer/)s, etc.
+## Overview
 
-By default, `kcp` only knows about:
+kcp is a Kubernetes-like control plane focusing on:
 
-- [`Namespace`](https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/)s
-- [`ServiceAccount`](https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/)s and [role-based access control](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) types like [`Role`](https://kubernetes.io/docs/reference/access-authn-authz/rbac/#role-and-clusterrole) and [`RoleBinding`](https://kubernetes.io/docs/reference/access-authn-authz/rbac/#rolebinding-and-clusterrolebinding)
-- [`Secret`](https://kubernetes.io/docs/concepts/configuration/secret/)s and [`ConfigMap`](https://kubernetes.io/docs/concepts/configuration/configmap/)s, to store configuration data
-- [`CustomResourceDefinition`](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)s, to define new types
-- a handful of other low-level resources like [`Lease`](https://kubernetes.io/docs/reference/kubernetes-api/cluster-resources/lease-v1/)s, [`Event`](https://kubernetes.io/docs/tasks/debug-application-cluster/debug-application-introspection/)s, etc.
+- A **control plane** for many independent, **isolated** “clusters” known as **workspaces**
+- Enabling API service providers to **offer APIs centrally** using **multi-tenant operators**
+- Easy **API consumption** for users in their workspaces
 
-![kubectl api-resources showing minimal API resources](./docs/images/kubectl-api-resources.png)
+kcp can be a building block for SaaS service providers who need a **massively multi-tenant platform** to offer services
+to a large number of fully isolated tenants using Kubernetes-native APIs. The goal is to be useful to cloud
+providers as well as enterprise IT departments offering APIs within their company.
 
-Like vanilla Kubernetes, `kcp` persists these resources in etcd for durable storage.
+**NB:** In May 2023, the kcp project was restructured and components related to workload scheduling (e.g. the syncer) and the transparent multi cluster (tmc) code were removed due to lack of interest/maintainers. Please refer to the [`main-pre-tmc-removal` branch](https://github.com/kcp-dev/kcp/tree/main-pre-tmc-removal) if you are interested in the related code.
 
-Any other resources, including Kubernetes-standard resources like [`Pod`](https://kubernetes.io/docs/concepts/workloads/pods/)s, [`Node`](https://kubernetes.io/docs/concepts/architecture/nodes/)s and the rest, can be added as [CRD](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)s and reconciled using the standard controllers.
+## Documentation
 
-## Why would I want that?
+Please visit [docs.kcp.io/kcp](https://docs.kcp.io/kcp/latest) for our documentation.
 
-Kubernetes is mainly known as a container orchestration platform today, but we believe it can be even more.
+## Contributing
 
-With the power of [`CustomResourceDefinition`](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)s, Kubernetes provides a flexible platform for declarative APIs of _all types_, and the reconciliation pattern common to Kubernetes controllers is a powerful tool in building robust, expressive systems.
+We ❤️ our contributors! If you're interested in helping us out, please check out [contributing to kcp](https://docs.kcp.io/kcp/main/contributing/).
 
-At the same time, a diverse and creative community of tools and services has sprung up around Kubernetes APIs.
+This community has a [Code of Conduct](./code-of-conduct.md). Please make sure to follow it.
 
-Imagine a declarative Kubernetes-style API for _anything_, supported by an ecosystem of Kubernetes-aware tooling, separate from Kubernetes-the-container-orchestrator.
+## Getting in touch
 
-That's **`kcp`**.
+There are several ways to communicate with us:
 
-
-## Is `kcp` a "fork" of Kubernetes? 🍴
-
-_No._
-
-`kcp` as a prototype currently depends on some unmerged changes to Kubernetes, but we intend to pursue these changes through the usual KEP process, until (hopefully!) Kubernetes can be configured to run as `kcp` runs today.
-
-Our intention is that our experiments _improve Kubernetes for everyone_, by improving [CRD](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)s and scaling resource watching, and enabling more, better controllers _for everyone_, whether you're using Kubernetes as a container orchestrator or not.
-
-Our `kcp` specific patches are in the [feature-logical-clusters](https://github.com/kcp-dev/kubernetes/tree/feature-logical-clusters) feature branch in the [kcp-dev/kubernetes](https://github.com/kcp-dev/kubernetes) repo. See [DEVELOPMENT.md](DEVELOPMENT.md) for how the patches are structured and how they must be formatted during our experimentation phase.  See [GOALS.md](GOALS.md) for more info on how we intend to use `kcp` as a test-bed for exploring ideas that improve the entire ecosystem.
-
-
-## What's in this repo?
-
-First off, this is a prototype, not a project. We're exploring these ideas here to try them out, experiment, and bounce them off each other.  Our [basic demo](contrib/demo/README.md) leverages the following components to show off these ideas:
-
-- **`kcp`**, which serves a Kubernetes-style API with a minimum of built-in types.
-- **`cluster-controller`**, which along with the `Cluster` CRD allows `kcp` to connect to other full-featured Kubernetes clusters, and includes these components:
-  - **`syncer`**, which runs on Kubernetes clusters registered with the `cluster-controller`, and watches `kcp` for resources assigned to the cluster
-  - **`deployment-splitter`**, which demonstrates a controller that can split a `Deployment` object into multiple "virtual Deployment" objects across multiple clusters.
-  - **`crd-puller`** which demonstrates mirroring CRDs from a cluster back to `kcp`
-
-
-## So what's this for?
-
-#### Multi-Cluster Kubernetes?
-
-`kcp` could be _useful_ for [multi-cluster scenarios](docs/investigations/transparent-multi-cluster.md), by running `kcp` as a control plane outside of any of your workload clusters.
-
-#### Multi-Tenant Kubernetes?
-
-`kcp` could be _useful_ for multi-tenancy scenarios, by allowing [multiple tenant clusters inside a cluster](docs/investigations/logical-clusters.md) to be managed by a single `kcp` control plane.
-
-#### Local Kubernetes Development?
-
-`kcp` could be _useful_ for local development scenarios, where you don't necessarily care about all of Kubernetes' many built-in resources and their reconciling controllers.
-
-#### Embedded/low-resource scenarios?
-
-`kcp` could be _useful_ for environments where resources are scarce, by limiting the number of controllers that need to run. Kubernetes' asynchronous reconciliation pattern can also be very powerful in disconnected or intermittently connected environments, regardless of how workloads actually run.
-
-### Is that all?
-
-No! See our [GOALS.md](GOALS.md) doc for more on what we are trying to accomplish with this prototype and our [docs/ directory](docs/).
-
-
-## What does `kcp` stand for?
-
-`kcp` as a project stands for equality and justice for all people.
-
-However, `kcp` is not an acronym.
-
-## How do I get started?
-1. Clone the repository.
-2. [Install Go](https://golang.org/doc/install) (1.16+).
-3. Download the [latest kubectl binary for your OS](https://kubernetes.io/docs/tasks/tools/#kubectl).
-4. Build and start `kcp` in the background: `go run ./cmd/kcp start`.
-5. Tell `kubectl` where to find the kubeconfig: `export KUBECONFIG=.kcp/data/admin.kubeconfig` (this assumes your working directory is the root directory of the repository).
-6. Confirm you can connect to `kcp`: `kubectl api-resources`.
-
-For more scenarios, see [DEVELOPMENT.md](DEVELOPMENT.md).
-
-## This sounds cool and I want to help!
-
-Thanks! And great!
-
-This work is still in early development, which means it's _not ready for production_, but also that your feedback can have a big impact.
-
-You can reach us here, in this repository via [issues](https://github.com/kcp-dev/kcp/issues) and [discussions](https://github.com/kcp-dev/kcp/discussions), or:
-
-- Join the [`#kcp-prototype` channel](https://app.slack.com/client/T09NY5SBT/C021U8WSAFK) in the [Kubernetes Slack workspace](https://slack.k8s.io)
-- Join the mailing lists
-    - [kcp-dev](https://groups.google.com/g/kcp-dev) for development discussions
-    - [kcp-users](https://groups.google.com/g/kcp-users) for discussions among users and potential users
-- Subscribe to the [community calendar](https://calendar.google.com/calendar/embed?src=ujjomvk4fa9fgdaem32afgl7g0%40group.calendar.google.com) for community meetings and events
-    - The kcp-dev mailing list is subscribed to this calendar
-- See recordings of past community meetings on [YouTube](https://www.youtube.com/channel/UCfP_yS5uYix0ppSbm2ltS5Q)
-- See [upcoming](https://github.com/kcp-dev/kcp/issues?q=is%3Aissue+is%3Aopen+label%3Acommunity-meeting) and [past](https://github.com/kcp-dev/kcp/issues?q=is%3Aissue+label%3Acommunity-meeting+is%3Aclosed) community meeting agendas and notes
+- The [`#kcp-dev` channel](https://app.slack.com/client/T09NY5SBT/C021U8WSAFK) in the [Kubernetes Slack workspace](https://slack.k8s.io).
+- Our mailing lists:
+    - [kcp-dev](https://groups.google.com/g/kcp-dev) for development discussions.
+    - [kcp-users](https://groups.google.com/g/kcp-users) for discussions among users and potential users.
+- By joining the kcp-dev mailing list, you should receive an invite to our bi-weekly community meetings.
+- See recordings of past community meetings on [YouTube](https://www.youtube.com/channel/UCfP_yS5uYix0ppSbm2ltS5Q).
+- The next community meeting dates are available via our [CNCF community group](https://community.cncf.io/kcp/).
+- Check the [community meeting notes document](https://docs.google.com/document/d/1PrEhbmq1WfxFv1fTikDBZzXEIJkUWVHdqDFxaY1Ply4) for future and past meeting agendas.
 - Browse the [shared Google Drive](https://drive.google.com/drive/folders/1FN7AZ_Q1CQor6eK0gpuKwdGFNwYI517M?usp=sharing) to share design docs, notes, etc.
-    - Members of the kcp-dev mailing list can view this drive
+    - Members of the kcp-dev mailing list can view this drive.
 
-## References
+## Additional references
 
-- [KubeCon EU 2021: Kubernetes as the Hybrid Cloud Control Plane Keynote - Clayton Coleman (video)](https://www.youtube.com/watch?v=oaPBYUfdFE8)
-- [OpenShift Commons: Kubernetes as the Control Plane for the Hybrid Cloud - Clayton Coleman (video)](https://www.youtube.com/watch?v=Y3Y11Aj_01I)
+- [Platform Engineering Day Europe 2024: Building a Platform Engineering API Layer with kcp – Marvin Beckers](https://www.youtube.com/watch?v=az5Rm8Snms4)
+- [KubeCon EU 2024: Why Kubernetes Is Inappropriate for Platforms, and How to Make It Better – Stefan Schimanski, Mangirdas Judeikis, Sebastian Scheele](https://www.youtube.com/watch?v=7op_r9R0fCo)
+- [KubeCon EU 2024: Kubernetes-style APIs for SaaS-like Control Planes with kcp – Marvin Beckers, Mangirdas Judeikis](https://www.youtube.com/watch?v=-P1kUo5zZR4)
+- [KubeCon US 2022: Kcp: Towards 1,000,000 Clusters, Name^WWorkspaced CRDs - Stefan Schimanski](https://www.youtube.com/watch?v=fGv5dpQ8X5I)
+- [Rejekts US 2022: What if namespaces provided more isolation than just names? – Stefan Schimanski](https://www.youtube.com/watch?v=WGrPUyx7qQE)
+- [Let's Learn kcp - A minimal Kubernetes API server with Saiyam Pathak - July 7, 2021](https://www.youtube.com/watch?v=M4mn_LlCyzk)
 - [TGI Kubernetes 157: Exploring kcp: apiserver without Kubernetes](https://youtu.be/FD_kY3Ey2pI)
-- [K8s SIG Architecture meeting discussing kcp, June 29 2021](https://www.youtube.com/watch?v=YrdAYoo-UQQ)
-- [Let's Learn kcp - A minimal Kubernetes API server with Saiyam Pathak, July 7 2021](https://www.youtube.com/watch?v=M4mn_LlCyzk)
+- [K8s SIG Architecture meeting discussing kcp - June 29, 2021](https://www.youtube.com/watch?v=YrdAYoo-UQQ)
+- [OpenShift Commons: Kubernetes as the Control Plane for the Hybrid Cloud - Clayton Coleman](https://www.youtube.com/watch?v=Y3Y11Aj_01I)
+- [KubeCon EU 2021: Kubernetes as the Hybrid Cloud Control Plane Keynote - Clayton Coleman](https://www.youtube.com/watch?v=oaPBYUfdFE8)
+
+
+## License
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fkcp-dev%2Fkcp.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fkcp-dev%2Fkcp?ref=badge_large)
