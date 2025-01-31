@@ -1,46 +1,49 @@
+/*
+Copyright 2021 The KCP Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package main
 
 import (
-	"context"
-	"crypto/tls"
-	"crypto/x509"
-	"errors"
-	"flag"
 	"fmt"
-	"io/ioutil"
-	"net"
-	"net/url"
 	"os"
-	"path/filepath"
-	"strconv"
+	"strings"
 
-	"github.com/kcp-dev/kcp/pkg/cmd/help"
-	"github.com/kcp-dev/kcp/pkg/etcd"
-	"github.com/kcp-dev/kcp/pkg/reconciler/apiresource"
-	"github.com/kcp-dev/kcp/pkg/reconciler/cluster"
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
-	"go.etcd.io/etcd/clientv3"
-	genericapiserver "k8s.io/apiserver/pkg/server"
-	"k8s.io/apiserver/pkg/storage/storagebackend"
-	"k8s.io/client-go/tools/clientcmd"
-	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
-	"k8s.io/kubernetes/pkg/controlplane"
-	"k8s.io/kubernetes/pkg/controlplane/clientutils"
-	"k8s.io/kubernetes/pkg/controlplane/options"
-)
 
-var (
-	syncerImage                         string
-	resourcesToSync                     []string
-	installClusterController            bool
-	pullMode, pushMode, autoPublishAPIs bool
-	listen                              string
-	etcdClientInfo                      etcd.ClientInfo
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	genericapiserver "k8s.io/apiserver/pkg/server"
+	"k8s.io/client-go/rest"
+	"k8s.io/component-base/cli"
+	cliflag "k8s.io/component-base/cli/flag"
+	"k8s.io/component-base/cli/globalflag"
+	"k8s.io/component-base/logs"
+	logsapiv1 "k8s.io/component-base/logs/api/v1"
+	_ "k8s.io/component-base/logs/json/register"
+	"k8s.io/component-base/term"
+	"k8s.io/component-base/version"
+	"k8s.io/klog/v2"
+
+	"github.com/kcp-dev/kcp/cmd/kcp/options"
+	"github.com/kcp-dev/kcp/pkg/embeddedetcd"
+	kcpfeatures "github.com/kcp-dev/kcp/pkg/features"
+	"github.com/kcp-dev/kcp/pkg/server"
+	"github.com/kcp-dev/kcp/sdk/cmd/help"
 )
 
 func main() {
-	help.FitTerminal()
 	cmd := &cobra.Command{
 		Use:   "kcp",
 		Short: "Kube for Control Plane (KCP)",
@@ -48,10 +51,10 @@ func main() {
 			KCP is the easiest way to manage Kubernetes applications against one or
 			more clusters, by giving you a personal control plane that schedules your
 			workloads onto one or many clusters, and making it simple to pick up and
-			move. Advanced use cases including spreading your apps across clusters for
-			resiliency, scheduling batch workloads onto clusters with free capacity,
-			and enabling collaboration for individual teams without having access to
-			the underlying clusters.
+			move. It supports advanced use cases such as spreading your apps across
+			clusters for resiliency, scheduling batch workloads onto clusters with
+			free capacity, and enabling collaboration for individual teams without
+			having access to the underlying clusters.
 
 			To get started, launch a new cluster with 'kcp start', which will
 			initialize your personal control plane and write an admin kubeconfig file
@@ -60,6 +63,32 @@ func main() {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
+
+	cols, _, _ := term.TerminalSize(cmd.OutOrStdout())
+
+	// manually extract root directory from flags first as it influence all other flags
+	rootDir := ".kcp"
+	additionalMappingsFile := ""
+	for i, f := range os.Args {
+		if f == "--root-directory" {
+			if i < len(os.Args)-1 {
+				rootDir = os.Args[i+1]
+			} // else let normal flag processing fail
+		} else if strings.HasPrefix(f, "--root-directory=") {
+			rootDir = strings.TrimPrefix(f, "--root-directory=")
+		} else if f == "--miniproxy-mapping-file" {
+			if i < len(os.Args)-1 {
+				additionalMappingsFile = os.Args[i+1]
+			} // else let normal flag processing fail
+		} else if strings.HasPrefix(f, "--miniproxy-mapping-file") {
+			additionalMappingsFile = strings.TrimPrefix(f, "--miniproxy-mapping-file=")
+		}
+	}
+
+	kcpOptions := options.NewOptions(rootDir)
+	kcpOptions.Server.GenericControlPlane.Logs.Verbosity = logsapiv1.VerbosityLevel(2)
+	kcpOptions.Server.Extra.AdditionalMappingsFile = additionalMappingsFile
+
 	startCmd := &cobra.Command{
 		Use:   "start",
 		Short: "Start the control plane process",
@@ -72,218 +101,102 @@ func main() {
 			kubeconfig file will be generated at initialization time that may be
 			used to access the control plane.
 		`),
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			// silence client-go warnings.
+			// apiserver loopback clients should not log self-issued warnings.
+			rest.SetDefaultWarningHandler(rest.NoWarnings{})
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			//flag.CommandLine.Lookup("v").Value.Set("9")
-
-			dir := filepath.Join(".", ".kcp")
-			if fi, err := os.Stat(dir); err != nil {
-				if !os.IsNotExist(err) {
-					return err
-				}
-				if err := os.Mkdir(dir, 0755); err != nil {
-					return err
-				}
-			} else {
-				if !fi.IsDir() {
-					return fmt.Errorf("%q is a file, please delete or select another location", dir)
-				}
-			}
-			s := &etcd.Server{
-				Dir: filepath.Join(dir, "data"),
-			}
-			ctx := context.TODO()
-
-			runFunc := func(cfg etcd.ClientInfo) error {
-				c, err := clientv3.New(clientv3.Config{
-					Endpoints: cfg.Endpoints,
-					TLS:       cfg.TLS,
-				})
-				if err != nil {
-					return err
-				}
-				defer c.Close()
-				r, err := c.Cluster.MemberList(context.Background())
-				if err != nil {
-					return err
-				}
-				for _, member := range r.Members {
-					fmt.Fprintf(os.Stderr, "Connected to etcd %d %s\n", member.GetID(), member.GetName())
-				}
-
-				serverOptions := options.NewServerRunOptions()
-				host, port, err := net.SplitHostPort(listen)
-				if err != nil {
-					return fmt.Errorf("--listen must be of format host:port: %w", err)
-				}
-
-				if host != "" {
-					serverOptions.SecureServing.BindAddress = net.ParseIP(host)
-				}
-				if port != "" {
-					p, err := strconv.Atoi(port)
-					if err != nil {
-						return err
-					}
-					serverOptions.SecureServing.BindPort = p
-				}
-
-				serverOptions.SecureServing.ServerCert.CertDirectory = s.Dir
-				serverOptions.InsecureServing = nil
-				serverOptions.Etcd.StorageConfig.Transport = storagebackend.TransportConfig{
-					ServerList:    cfg.Endpoints,
-					CertFile:      cfg.CertFile,
-					KeyFile:       cfg.KeyFile,
-					TrustedCAFile: cfg.TrustedCAFile,
-				}
-				cpOptions, err := controlplane.Complete(serverOptions)
-				if err != nil {
-					return err
-				}
-
-				server, err := controlplane.CreateServerChain(cpOptions, ctx.Done())
-				if err != nil {
-					return err
-				}
-
-				var clientConfig clientcmdapi.Config
-				clientConfig.AuthInfos = map[string]*clientcmdapi.AuthInfo{
-					"loopback": {Token: server.LoopbackClientConfig.BearerToken},
-				}
-				clientConfig.Clusters = map[string]*clientcmdapi.Cluster{
-					// admin is the virtual cluster running by default
-					"admin": {
-						Server:                   server.LoopbackClientConfig.Host,
-						CertificateAuthorityData: server.LoopbackClientConfig.CAData,
-						TLSServerName:            server.LoopbackClientConfig.TLSClientConfig.ServerName,
-					},
-					// user is a virtual cluster that is lazily instantiated
-					"user": {
-						Server:                   server.LoopbackClientConfig.Host + "/clusters/user",
-						CertificateAuthorityData: server.LoopbackClientConfig.CAData,
-						TLSServerName:            server.LoopbackClientConfig.TLSClientConfig.ServerName,
-					},
-				}
-				clientConfig.Contexts = map[string]*clientcmdapi.Context{
-					"admin": {Cluster: "admin", AuthInfo: "loopback"},
-					"user":  {Cluster: "user", AuthInfo: "loopback"},
-				}
-				clientConfig.CurrentContext = "admin"
-				if err := clientcmd.WriteToFile(clientConfig, filepath.Join(s.Dir, "admin.kubeconfig")); err != nil {
-					return err
-				}
-
-				if installClusterController {
-					server.AddPostStartHook("Install Cluster Controller", func(context genericapiserver.PostStartHookContext) error {
-						// Register the `clusters` CRD in both the admin and user logical clusters
-						for contextName := range clientConfig.Contexts {
-							logicalClusterConfig, err := clientcmd.NewNonInteractiveClientConfig(clientConfig, contextName, &clientcmd.ConfigOverrides{}, nil).ClientConfig()
-							if err != nil {
-								return err
-							}
-							cluster.RegisterCRDs(logicalClusterConfig)
-						}
-						adminConfig, err := clientcmd.NewNonInteractiveClientConfig(clientConfig, "admin", &clientcmd.ConfigOverrides{}, nil).ClientConfig()
-						if err != nil {
-							return err
-						}
-
-						kubeconfig := clientConfig.DeepCopy()
-						for _, cluster := range kubeconfig.Clusters {
-							hostURL, err := url.Parse(cluster.Server)
-							if err != nil {
-								return err
-							}
-							hostURL.Host = server.ExternalAddress
-							cluster.Server = hostURL.String()
-						}
-
-						if pullMode && pushMode {
-							return errors.New("can't set --push_mode and --pull_mode")
-						}
-						syncerMode := cluster.SyncerModeNone
-						if pullMode {
-							syncerMode = cluster.SyncerModePull
-						}
-						if pushMode {
-							syncerMode = cluster.SyncerModePush
-						}
-
-						clientutils.EnableMultiCluster(adminConfig, nil, "clusters", "customresourcedefinitions", "apiresourceimports", "negotiatedapiresources")
-						clusterController := cluster.NewController(
-							adminConfig,
-							syncerImage,
-							*kubeconfig,
-							resourcesToSync,
-							syncerMode,
-						)
-						clusterController.Start(2)
-
-						apiresourceController := apiresource.NewController(
-							adminConfig,
-							autoPublishAPIs,
-						)
-						apiresourceController.Start(2)
-
-						return nil
-					})
-				}
-
-				prepared := server.PrepareRun()
-
-				return prepared.Run(ctx.Done())
+			// run as early as possible to avoid races later when some components (e.g. grpc) start early using klog
+			if err := logsapiv1.ValidateAndApply(kcpOptions.Server.GenericControlPlane.Logs, kcpfeatures.DefaultFeatureGate); err != nil {
+				return err
 			}
 
-			if len(etcdClientInfo.Endpoints) == 0 {
-				// No etcd servers specified so create one in-process:
-				return s.Run(runFunc)
+			completedKcpOptions, err := kcpOptions.Complete()
+			if err != nil {
+				return err
 			}
 
-			etcdClientInfo.TLS = &tls.Config{
-				InsecureSkipVerify: true,
+			if errs := completedKcpOptions.Validate(); len(errs) > 0 {
+				return utilerrors.NewAggregate(errs)
 			}
 
-			if len(etcdClientInfo.CertFile) > 0 && len(etcdClientInfo.KeyFile) > 0 {
-				cert, err := tls.LoadX509KeyPair(etcdClientInfo.CertFile, etcdClientInfo.KeyFile)
-				if err != nil {
-					return fmt.Errorf("failed to load x509 keypair: %s", err)
-				}
-				etcdClientInfo.TLS.Certificates = []tls.Certificate{cert}
+			logger := klog.FromContext(cmd.Context())
+			logger.Info("running with selected batteries", "batteries", strings.Join(completedKcpOptions.Server.Extra.BatteriesIncluded, ","))
+
+			ctx := genericapiserver.SetupSignalContext()
+
+			serverConfig, err := server.NewConfig(ctx, completedKcpOptions.Server)
+			if err != nil {
+				return err
 			}
 
-			if len(etcdClientInfo.TrustedCAFile) > 0 {
-				if caCert, err := ioutil.ReadFile(etcdClientInfo.TrustedCAFile); err != nil {
-					return fmt.Errorf("failed to read ca file: %s", err)
-				} else {
-					caPool := x509.NewCertPool()
-					caPool.AppendCertsFromPEM(caCert)
-					etcdClientInfo.TLS.RootCAs = caPool
-					etcdClientInfo.TLS.InsecureSkipVerify = false
+			completedConfig, err := serverConfig.Complete()
+			if err != nil {
+				return err
+			}
+
+			// the etcd server must be up before NewServer because storage decorators access it right away
+			if completedConfig.EmbeddedEtcd.Config != nil {
+				if err := embeddedetcd.NewServer(completedConfig.EmbeddedEtcd).Run(ctx); err != nil {
+					return err
 				}
 			}
 
-			return runFunc(etcdClientInfo)
+			s, err := server.NewServer(completedConfig)
+			if err != nil {
+				return err
+			}
+			return s.Run(ctx)
 		},
 	}
-	startCmd.Flags().AddFlag(pflag.PFlagFromGoFlag(flag.CommandLine.Lookup("v")))
-	startCmd.Flags().StringVar(&syncerImage, "syncer_image", "quay.io/kcp-dev/kcp-syncer", "References a container image that contains syncer and will be used by the syncer POD in registered physical clusters.")
-	startCmd.Flags().StringArrayVar(&resourcesToSync, "resources_to_sync", []string{"pods", "deployments.apps"}, "Provides the list of resources that should be synced from KCP logical cluster to underlying physical clusters")
-	startCmd.Flags().BoolVar(&installClusterController, "install_cluster_controller", false, "Registers the sample cluster custom resource, and the related controller to allow registering physical clusters")
-	startCmd.Flags().BoolVar(&pullMode, "pull_mode", false, "Deploy the syncer in registered physical clusters in POD, and have it sync resources from KCP")
-	startCmd.Flags().BoolVar(&pushMode, "push_mode", false, "If true, run syncer for each cluster from inside cluster controller")
-	startCmd.Flags().StringVar(&listen, "listen", ":6443", "Address:port to bind to")
-	startCmd.Flags().BoolVar(&autoPublishAPIs, "auto_publish_apis", false, "If true, the APIs imported from physical clusters will be published automatically as CRDs")
 
-	startCmd.Flags().StringSliceVar(&etcdClientInfo.Endpoints, "etcd-servers", etcdClientInfo.Endpoints,
-		"List of external etcd servers to connect with (scheme://ip:port), comma separated. If absent an in-process etcd will be created.")
-	startCmd.Flags().StringVar(&etcdClientInfo.KeyFile, "etcd-keyfile", etcdClientInfo.KeyFile,
-		"TLS key file used to secure etcd communication.")
-	startCmd.Flags().StringVar(&etcdClientInfo.CertFile, "etcd-certfile", etcdClientInfo.CertFile,
-		"TLS certification file used to secure etcd communication.")
-	startCmd.Flags().StringVar(&etcdClientInfo.TrustedCAFile, "etcd-cafile", etcdClientInfo.TrustedCAFile,
-		"TLS Certificate Authority file used to secure etcd communication.")
-
-	cmd.AddCommand(startCmd)
-	if err := cmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	// add start named flag sets to start flags
+	fss := cliflag.NamedFlagSets{}
+	kcpOptions.AddFlags(&fss)
+	globalflag.AddGlobalFlags(fss.FlagSet("global"), cmd.Name(), logs.SkipLoggingConfigurationFlags())
+	startFlags := startCmd.Flags()
+	for _, f := range fss.FlagSets {
+		startFlags.AddFlagSet(f)
 	}
+
+	startOptionsCmd := &cobra.Command{
+		Use:   "options",
+		Short: "Show all start command options",
+		Long: help.Doc(`
+			Show all start command options
+
+			"kcp start"" has a large number of options. This command shows all of them.
+		`),
+		PersistentPreRunE: func(*cobra.Command, []string) error {
+			// silence client-go warnings.
+			// apiserver loopback clients should not log self-issued warnings.
+			rest.SetDefaultWarningHandler(rest.NoWarnings{})
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Fprintf(cmd.OutOrStdout(), usageFmt, startCmd.UseLine())
+			cliflag.PrintSections(cmd.OutOrStdout(), fss, cols)
+			return nil
+		},
+	}
+	startCmd.AddCommand(startOptionsCmd)
+	cmd.AddCommand(startCmd)
+
+	setPartialUsageAndHelpFunc(startCmd, fss, cols, []string{
+		"etcd-servers",
+		"batteries-included",
+		"run-virtual-workspaces",
+	})
+
+	help.FitTerminal(cmd.OutOrStdout())
+
+	if v := version.Get().String(); len(v) == 0 {
+		cmd.Version = "<unknown>"
+	} else {
+		cmd.Version = v
+	}
+
+	os.Exit(cli.Run(cmd))
 }

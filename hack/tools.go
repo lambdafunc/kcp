@@ -1,7 +1,8 @@
-// +build tools
+//go:build kcptools
+// +build kcptools
 
 /*
-Copyright 2021 The Authors
+Copyright 2021 The KCP Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,4 +20,10 @@ limitations under the License.
 package tools
 
 // This package imports things required by this repository, to force `go mod` to see them as dependencies
-import _ "k8s.io/code-generator"
+import (
+	_ "k8s.io/code-generator/cmd/applyconfiguration-gen"
+	_ "k8s.io/code-generator/cmd/client-gen"
+	_ "k8s.io/code-generator/cmd/deepcopy-gen"
+	_ "k8s.io/code-generator/cmd/informer-gen"
+	_ "k8s.io/code-generator/cmd/lister-gen"
+)
